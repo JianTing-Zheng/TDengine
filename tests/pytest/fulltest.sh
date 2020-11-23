@@ -155,6 +155,9 @@ python3 ./test.py -f query/queryCountCSVData.py
 python3 ./test.py -f query/natualInterval.py
 python3 ./test.py -f query/bug1471.py
 #python3 ./test.py -f query/dataLossTest.py
+python3 ./test.py -f query/bug1874.py
+python3 ./test.py -f query/bug1875.py
+python3 ./test.py -f query/bug1876.py
 
 #stream
 python3 ./test.py -f stream/metric_1.py
@@ -199,6 +202,7 @@ python3 queryCount.py
 python3 ./test.py -f query/queryGroupbyWithInterval.py
 python3 client/twoClients.py
 python3 test.py -f query/queryInterval.py
+python3 test.py -f query/queryFillTest.py
 
 # tools
 python3 test.py -f tools/taosdemo.py

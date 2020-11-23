@@ -136,6 +136,7 @@ typedef struct SSqlExpr {
   int16_t   numOfParams;    // argument value of each function
   tVariant  param[3];       // parameters are not more than 3
   int32_t   offset;         // sub result column value of arithmetic expression.
+  int16_t   resColId;          // result column id
 } SSqlExpr;
 
 typedef struct SColumnIndex {
@@ -251,6 +252,7 @@ typedef struct SQueryInfo {
   int64_t          clauseLimit;   // limit for current sub clause
   int64_t          prjOffset;     // offset value in the original sql expression, only applied at client side
   int32_t          udColumnId;    // current user-defined constant output field column id, monotonically decreases from TSDB_UD_COLUMN_INDEX
+  int16_t          resColumnId;   // result column id
 } SQueryInfo;
 
 typedef struct {
@@ -291,32 +293,32 @@ typedef struct SResRec {
 } SResRec;
 
 typedef struct {
-  int64_t               numOfRows;                  // num of results in current retrieved
-  int64_t               numOfRowsGroup;             // num of results of current group
-  int64_t               numOfTotal;                 // num of total results
-  int64_t               numOfClauseTotal;           // num of total result in current subclause
-  char *                pRsp;
-  int32_t               rspType;
-  int32_t               rspLen;
-  uint64_t              qhandle;
-  int64_t               uid;
-  int64_t               useconds;
-  int64_t               offset;  // offset value from vnode during projection query of stable
-  int32_t               row;
-  int16_t               numOfCols;
-  int16_t               precision;
-  bool                  completed;
-  int32_t               code;
-  int32_t               numOfGroups;
-  SResRec *             pGroupRec;
-  char *                data;
-  TAOS_ROW              tsrow;
-  int32_t*              length;  // length for each field for current row
-  char **               buffer;  // Buffer used to put multibytes encoded using unicode (wchar_t)
-  SColumnIndex *        pColumnIndex;
+  int32_t        numOfRows;                  // num of results in current retrieval
+  int64_t        numOfRowsGroup;             // num of results of current group
+  int64_t        numOfTotal;                 // num of total results
+  int64_t        numOfClauseTotal;           // num of total result in current subclause
+  char *         pRsp;
+  int32_t        rspType;
+  int32_t        rspLen;
+  uint64_t       qhandle;
+  int64_t        useconds;
+  int64_t        offset;  // offset value from vnode during projection query of stable
+  int32_t        row;
+  int16_t        numOfCols;
+  int16_t        precision;
+  bool           completed;
+  int32_t        code;
+  int32_t        numOfGroups;
+  SResRec *      pGroupRec;
+  char *         data;
+  TAOS_ROW       tsrow;
+  TAOS_ROW       urow;
+  int32_t*       length;  // length for each field for current row
+  char **        buffer;  // Buffer used to put multibytes encoded using unicode (wchar_t)
+  SColumnIndex*  pColumnIndex;
+
   SArithmeticSupport*   pArithSup;   // support the arithmetic expression calculation on agg functions
-  
-  struct SLocalReducer *pLocalReducer;
+  struct SLocalReducer* pLocalReducer;
 } SSqlRes;
 
 typedef struct STscObj {
@@ -423,6 +425,7 @@ int32_t tscTansformSQLFuncForSTableQuery(SQueryInfo *pQueryInfo);
 void    tscRestoreSQLFuncForSTableQuery(SQueryInfo *pQueryInfo);
 
 int32_t tscCreateResPointerInfo(SSqlRes *pRes, SQueryInfo *pQueryInfo);
+void tscSetResRawPtr(SSqlRes* pRes, SQueryInfo* pQueryInfo);
 
 void tscResetSqlCmdObj(SSqlCmd *pCmd, bool removeFromCache);
 
@@ -462,17 +465,17 @@ int32_t tscSQLSyntaxErrMsg(char* msg, const char* additionalInfo,  const char* s
 
 int32_t tscToSQLCmd(SSqlObj *pSql, struct SSqlInfo *pInfo);
 
-static FORCE_INLINE void tscGetResultColumnChr(SSqlRes* pRes, SFieldInfo* pFieldInfo, int32_t columnIndex) {
+static FORCE_INLINE void tscGetResultColumnChr(SSqlRes* pRes, SFieldInfo* pFieldInfo, int32_t columnIndex, int32_t offset) {
   SInternalField* pInfo = (SInternalField*) TARRAY_GET_ELEM(pFieldInfo->internalField, columnIndex);
-  assert(pInfo->pSqlExpr != NULL);
 
-  int32_t type = pInfo->pSqlExpr->resType;
-  int32_t bytes = pInfo->pSqlExpr->resBytes;
+  int32_t type = pInfo->field.type;
+  int32_t bytes = pInfo->field.bytes;
 
-  char* pData = pRes->data + (int32_t)(pInfo->pSqlExpr->offset * pRes->numOfRows + bytes * pRes->row);
+  char* pData = pRes->data + (int32_t)(offset * pRes->numOfRows + bytes * pRes->row);
+  UNUSED(pData);
 
-  // user defined constant value output columns
-  if (TSDB_COL_IS_UD_COL(pInfo->pSqlExpr->colInfo.flag)) {
+//   user defined constant value output columns
+  if (pInfo->pSqlExpr != NULL && TSDB_COL_IS_UD_COL(pInfo->pSqlExpr->colInfo.flag)) {
     if (type == TSDB_DATA_TYPE_NCHAR || type == TSDB_DATA_TYPE_BINARY) {
       pData = pInfo->pSqlExpr->param[1].pz;
       pRes->length[columnIndex] = pInfo->pSqlExpr->param[1].nLen;
@@ -517,6 +520,7 @@ extern SRpcCorEpSet tscMgmtEpSet;
 extern int (*tscBuildMsg[TSDB_SQL_MAX])(SSqlObj *pSql, SSqlInfo *pInfo);
 
 void tscBuildVgroupTableInfo(SSqlObj* pSql, STableMetaInfo* pTableMetaInfo, SArray* tables);
+int16_t getNewResColId(SQueryInfo* pQueryInfo);
 
 #ifdef __cplusplus
 }

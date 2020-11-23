@@ -24,7 +24,7 @@ int32_t getOutputInterResultBufSize(SQuery* pQuery) {
   int32_t size = 0;
 
   for (int32_t i = 0; i < pQuery->numOfOutput; ++i) {
-    size += pQuery->pSelectExpr[i].interBytes;
+    size += pQuery->pExpr1[i].interBytes;
   }
 
   assert(size >= 0);
@@ -53,7 +53,7 @@ void cleanupTimeWindowInfo(SWindowResInfo *pWindowResInfo) {
     return;
   }
   if (pWindowResInfo->capacity == 0) {
-    assert(/*pWindowResInfo->hashList == NULL && */pWindowResInfo->pResult == NULL);
+    assert(pWindowResInfo->pResult == NULL);
     return;
   }
   
@@ -64,10 +64,18 @@ void resetTimeWindowInfo(SQueryRuntimeEnv *pRuntimeEnv, SWindowResInfo *pWindowR
   if (pWindowResInfo == NULL || pWindowResInfo->capacity == 0) {
     return;
   }
-  
+
+//  assert(pWindowResInfo->size == 1);
+
   for (int32_t i = 0; i < pWindowResInfo->size; ++i) {
     SResultRow *pWindowRes = pWindowResInfo->pResult[i];
     clearResultRow(pRuntimeEnv, pWindowRes);
+
+    int32_t groupIndex = 0;
+    int64_t uid = 0;
+
+    SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, &groupIndex, sizeof(groupIndex), uid);
+    taosHashRemove(pRuntimeEnv->pResultRowHashTable, (const char *)pRuntimeEnv->keyBuf, GET_RES_WINDOW_KEY_LEN(sizeof(groupIndex)));
   }
   
   pWindowResInfo->curIndex = -1;
@@ -77,7 +85,7 @@ void resetTimeWindowInfo(SQueryRuntimeEnv *pRuntimeEnv, SWindowResInfo *pWindowR
   pWindowResInfo->prevSKey = TSKEY_INITIAL_VAL;
 }
 
-void clearFirstNTimeWindow(SQueryRuntimeEnv *pRuntimeEnv, int32_t num) {
+void clearFirstNWindowRes(SQueryRuntimeEnv *pRuntimeEnv, int32_t num) {
   SWindowResInfo *pWindowResInfo = &pRuntimeEnv->windowResInfo;
   if (pWindowResInfo == NULL || pWindowResInfo->capacity == 0 || pWindowResInfo->size == 0 || num == 0) {
     return;
@@ -88,6 +96,11 @@ void clearFirstNTimeWindow(SQueryRuntimeEnv *pRuntimeEnv, int32_t num) {
 
   int16_t  type = pWindowResInfo->type;
   STableId* id  = TSDB_TABLEID(pRuntimeEnv->pQuery->current->pTable); // uid is always set to be 0.
+  int64_t uid = id->uid;
+  if (pRuntimeEnv->groupbyNormalCol) {
+    uid = 0;
+  }
+
   char    *key  = NULL;
   int16_t  bytes = -1;
 
@@ -97,14 +110,14 @@ void clearFirstNTimeWindow(SQueryRuntimeEnv *pRuntimeEnv, int32_t num) {
 
       // todo refactor
       if (type == TSDB_DATA_TYPE_BINARY || type == TSDB_DATA_TYPE_NCHAR) {
-        key = varDataVal(pResult->key);
+        key   = varDataVal(pResult->key);
         bytes = varDataLen(pResult->key);
       } else {
         key = (char*) &pResult->win.skey;
         bytes = tDataTypeDesc[pWindowResInfo->type].nSize;
       }
 
-      SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, key, bytes, id->uid);
+      SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, key, bytes, uid);
       taosHashRemove(pRuntimeEnv->pResultRowHashTable, (const char *)pRuntimeEnv->keyBuf, GET_RES_WINDOW_KEY_LEN(bytes));
     } else {
       break;
@@ -137,14 +150,14 @@ void clearFirstNTimeWindow(SQueryRuntimeEnv *pRuntimeEnv, int32_t num) {
       bytes = tDataTypeDesc[pWindowResInfo->type].nSize;
     }
 
-    SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, key, bytes, id->uid);
+    SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, key, bytes, uid);
     int32_t *p = (int32_t *)taosHashGet(pRuntimeEnv->pResultRowHashTable, (const char *)pRuntimeEnv->keyBuf, GET_RES_WINDOW_KEY_LEN(bytes));
     assert(p != NULL); 
 
     int32_t  v = (*p - num);
     assert(v >= 0 && v <= pWindowResInfo->size);
 
-    SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, key, bytes, id->uid);
+    SET_RES_WINDOW_KEY(pRuntimeEnv->keyBuf, key, bytes, uid);
     taosHashPut(pRuntimeEnv->pResultRowHashTable, pRuntimeEnv->keyBuf, GET_RES_WINDOW_KEY_LEN(bytes), (char *)&v, sizeof(int32_t));
   }
   
@@ -158,7 +171,7 @@ void clearClosedTimeWindow(SQueryRuntimeEnv *pRuntimeEnv) {
   }
   
   int32_t numOfClosed = numOfClosedTimeWindow(pWindowResInfo);
-  clearFirstNTimeWindow(pRuntimeEnv, numOfClosed);
+  clearFirstNWindowRes(pRuntimeEnv, numOfClosed);
 }
 
 int32_t numOfClosedTimeWindow(SWindowResInfo *pWindowResInfo) {
@@ -237,7 +250,7 @@ void clearResultRow(SQueryRuntimeEnv *pRuntimeEnv, SResultRow *pWindowRes) {
       SResultRowCellInfo *pResultInfo = &pWindowRes->pCellInfo[i];
 
       char * s = getPosInResultPage(pRuntimeEnv, i, pWindowRes, page);
-      size_t size = pRuntimeEnv->pQuery->pSelectExpr[i].bytes;
+      size_t size = pRuntimeEnv->pQuery->pExpr1[i].bytes;
       memset(s, 0, size);
 
       RESET_RESULT_INFO(pResultInfo);
@@ -280,7 +293,7 @@ void copyResultRow(SQueryRuntimeEnv *pRuntimeEnv, SResultRow *dst, const SResult
 
     tFilePage *srcpage = getResBufPage(pRuntimeEnv->pResultBuf, src->pageId);
     char * srcBuf = getPosInResultPage(pRuntimeEnv, i, (SResultRow *)src, srcpage);
-    size_t s = pRuntimeEnv->pQuery->pSelectExpr[i].bytes;
+    size_t s = pRuntimeEnv->pQuery->pExpr1[i].bytes;
     
     memcpy(dstBuf, srcBuf, s);
   }

@@ -34,7 +34,7 @@ int32_t initWindowResInfo(SWindowResInfo* pWindowResInfo, int32_t size, int32_t 
 
 void    cleanupTimeWindowInfo(SWindowResInfo* pWindowResInfo);
 void    resetTimeWindowInfo(SQueryRuntimeEnv* pRuntimeEnv, SWindowResInfo* pWindowResInfo);
-void    clearFirstNTimeWindow(SQueryRuntimeEnv *pRuntimeEnv, int32_t num);
+void    clearFirstNWindowRes(SQueryRuntimeEnv *pRuntimeEnv, int32_t num);
 
 void    clearClosedTimeWindow(SQueryRuntimeEnv* pRuntimeEnv);
 int32_t numOfClosedTimeWindow(SWindowResInfo* pWindowResInfo);
@@ -48,7 +48,7 @@ static FORCE_INLINE SResultRow *getResultRow(SWindowResInfo *pWindowResInfo, int
 }
 
 #define curTimeWindowIndex(_winres)        ((_winres)->curIndex)
-#define GET_ROW_PARAM_FOR_MULTIOUTPUT(_q, tbq, sq) (((tbq) && (!sq))? (_q)->pSelectExpr[1].base.arg->argValue.i64:1)
+#define GET_ROW_PARAM_FOR_MULTIOUTPUT(_q, tbq, sq) (((tbq) && (!sq))? (_q)->pExpr1[1].base.arg->argValue.i64:1)
 
 bool isWindowResClosed(SWindowResInfo *pWindowResInfo, int32_t slot);
 
@@ -62,7 +62,7 @@ static FORCE_INLINE char *getPosInResultPage(SQueryRuntimeEnv *pRuntimeEnv, int3
 
   int32_t realRowId = (int32_t)(pResult->rowId * GET_ROW_PARAM_FOR_MULTIOUTPUT(pQuery, pRuntimeEnv->topBotQuery, pRuntimeEnv->stableQuery));
   return ((char *)page->data) + pRuntimeEnv->offset[columnIndex] * pRuntimeEnv->numOfRowsPerPage +
-      pQuery->pSelectExpr[columnIndex].bytes * realRowId;
+      pQuery->pExpr1[columnIndex].bytes * realRowId;
 }
 
 bool isNull_filter(SColumnFilterElem *pFilter, char* minval, char* maxval);

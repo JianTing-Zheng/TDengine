@@ -152,7 +152,10 @@ typedef struct SQuery {
   SLimitVal        limit;
   int32_t          rowSize;
   SSqlGroupbyExpr* pGroupbyExpr;
-  SExprInfo*       pSelectExpr;
+  SExprInfo*       pExpr1;
+  SExprInfo*       pExpr2;
+  int32_t          numOfExpr2;
+
   SColumnInfo*     colList;
   SColumnInfo*     tagColList;
   int32_t          numOfFilterCols;
@@ -168,11 +171,10 @@ typedef struct SQuery {
 
 typedef struct SQueryRuntimeEnv {
   jmp_buf              env;
-  SResultRow*          pResultRow;       // todo refactor to merge with SWindowResInfo
   SQuery*              pQuery;
   SQLFunctionCtx*      pCtx;
   int32_t              numOfRowsPerPage;
-  uint16_t             offset[TSDB_MAX_COLUMNS];
+  uint16_t*            offset;
   uint16_t             scanFlag;         // denotes reversed scan of data or not
   SFillInfo*           pFillInfo;
   SWindowResInfo       windowResInfo;

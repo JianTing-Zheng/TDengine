@@ -547,7 +547,7 @@ static int32_t tscEstimateQueryMsgSize(SSqlCmd *pCmd, int32_t clauseIndex) {
   int32_t srcColListSize = (int32_t)(taosArrayGetSize(pQueryInfo->colList) * sizeof(SColumnInfo));
 
   size_t  numOfExprs = tscSqlExprNumOfExprs(pQueryInfo);
-  int32_t exprSize = (int32_t)(sizeof(SSqlFuncMsg) * numOfExprs);
+  int32_t exprSize = (int32_t)(sizeof(SSqlFuncMsg) * numOfExprs * 2);
 
   int32_t tsBufSize = (pQueryInfo->tsBuf != NULL) ? pQueryInfo->tsBuf->fileSize : 0;
 
@@ -698,7 +698,7 @@ int tscBuildQueryMsg(SSqlObj *pSql, SSqlInfo *pInfo) {
   pQueryMsg->queryType      = htonl(pQueryInfo->type);
   
   size_t numOfOutput = tscSqlExprNumOfExprs(pQueryInfo);
-  pQueryMsg->numOfOutput = htons((int16_t)numOfOutput);
+  pQueryMsg->numOfOutput = htons((int16_t)numOfOutput);  // this is the stage one output column number
 
   // set column list ids
   size_t numOfCols = taosArrayGetSize(pQueryInfo->colList);
@@ -760,12 +760,15 @@ int tscBuildQueryMsg(SSqlObj *pSql, SSqlInfo *pInfo) {
       return TSDB_CODE_TSC_INVALID_SQL;
     }
 
+    assert(pExpr->resColId < 0);
+
     pSqlFuncExpr->colInfo.colId    = htons(pExpr->colInfo.colId);
     pSqlFuncExpr->colInfo.colIndex = htons(pExpr->colInfo.colIndex);
     pSqlFuncExpr->colInfo.flag     = htons(pExpr->colInfo.flag);
 
     pSqlFuncExpr->functionId  = htons(pExpr->functionId);
     pSqlFuncExpr->numOfParams = htons(pExpr->numOfParams);
+    pSqlFuncExpr->resColId    = htons(pExpr->resColId);
     pMsg += sizeof(SSqlFuncMsg);
 
     for (int32_t j = 0; j < pExpr->numOfParams; ++j) {
@@ -783,7 +786,74 @@ int tscBuildQueryMsg(SSqlObj *pSql, SSqlInfo *pInfo) {
 
     pSqlFuncExpr = (SSqlFuncMsg *)pMsg;
   }
-  
+
+  size_t output = tscNumOfFields(pQueryInfo);
+
+  if (tscIsSecondStageQuery(pQueryInfo)) {
+    pQueryMsg->secondStageOutput = htonl((int32_t) output);
+
+    SSqlFuncMsg *pSqlFuncExpr1 = (SSqlFuncMsg *)pMsg;
+
+    for (int32_t i = 0; i < output; ++i) {
+      SInternalField* pField = tscFieldInfoGetInternalField(&pQueryInfo->fieldsInfo, i);
+      SSqlExpr *pExpr = pField->pSqlExpr;
+      if (pExpr != NULL) {
+        if (!tscValidateColumnId(pTableMetaInfo, pExpr->colInfo.colId, pExpr->numOfParams)) {
+          tscError("%p table schema is not matched with parsed sql", pSql);
+          return TSDB_CODE_TSC_INVALID_SQL;
+        }
+
+        pSqlFuncExpr1->colInfo.colId    = htons(pExpr->colInfo.colId);
+        pSqlFuncExpr1->colInfo.colIndex = htons(pExpr->colInfo.colIndex);
+        pSqlFuncExpr1->colInfo.flag     = htons(pExpr->colInfo.flag);
+
+        pSqlFuncExpr1->functionId  = htons(pExpr->functionId);
+        pSqlFuncExpr1->numOfParams = htons(pExpr->numOfParams);
+        pMsg += sizeof(SSqlFuncMsg);
+
+        for (int32_t j = 0; j < pExpr->numOfParams; ++j) {
+          // todo add log
+          pSqlFuncExpr1->arg[j].argType = htons((uint16_t)pExpr->param[j].nType);
+          pSqlFuncExpr1->arg[j].argBytes = htons(pExpr->param[j].nLen);
+
+          if (pExpr->param[j].nType == TSDB_DATA_TYPE_BINARY) {
+            memcpy(pMsg, pExpr->param[j].pz, pExpr->param[j].nLen);
+            pMsg += pExpr->param[j].nLen;
+          } else {
+            pSqlFuncExpr1->arg[j].argValue.i64 = htobe64(pExpr->param[j].i64Key);
+          }
+        }
+
+        pSqlFuncExpr1 = (SSqlFuncMsg *)pMsg;
+      } else {
+        assert(pField->pArithExprInfo != NULL);
+        SExprInfo* pExprInfo = pField->pArithExprInfo;
+
+        pSqlFuncExpr1->colInfo.colId    = htons(pExprInfo->base.colInfo.colId);
+        pSqlFuncExpr1->functionId  = htons(pExprInfo->base.functionId);
+        pSqlFuncExpr1->numOfParams = htons(pExprInfo->base.numOfParams);
+        pMsg += sizeof(SSqlFuncMsg);
+
+        for (int32_t j = 0; j < pExprInfo->base.numOfParams; ++j) {
+          // todo add log
+          pSqlFuncExpr1->arg[j].argType = htons((uint16_t)pExprInfo->base.arg[j].argType);
+          pSqlFuncExpr1->arg[j].argBytes = htons(pExprInfo->base.arg[j].argBytes);
+
+          if (pExprInfo->base.arg[j].argType == TSDB_DATA_TYPE_BINARY) {
+            memcpy(pMsg, pExprInfo->base.arg[j].argValue.pz, pExprInfo->base.arg[j].argBytes);
+            pMsg += pExprInfo->base.arg[j].argBytes;
+          } else {
+            pSqlFuncExpr1->arg[j].argValue.i64 = htobe64(pExprInfo->base.arg[j].argValue.i64);
+          }
+        }
+
+        pSqlFuncExpr1 = (SSqlFuncMsg *)pMsg;
+      }
+    }
+  } else {
+    pQueryMsg->secondStageOutput = 0;
+  }
+
   // serialize the table info (sid, uid, tags)
   pMsg = doSerializeTableInfo(pQueryMsg, pSql, pMsg);
   
@@ -810,7 +880,7 @@ int tscBuildQueryMsg(SSqlObj *pSql, SSqlInfo *pInfo) {
   }
 
   if (pQueryInfo->fillType != TSDB_FILL_NONE) {
-    for (int32_t i = 0; i < pQueryInfo->fieldsInfo.numOfOutput; ++i) {
+    for (int32_t i = 0; i < tscSqlExprNumOfExprs(pQueryInfo); ++i) {
       *((int64_t *)pMsg) = htobe64(pQueryInfo->fillVal[i]);
       pMsg += sizeof(pQueryInfo->fillVal[0]);
     }
@@ -1368,19 +1438,6 @@ int tscBuildRetrieveFromMgmtMsg(SSqlObj *pSql, SSqlInfo *pInfo) {
   return TSDB_CODE_SUCCESS;
 }
 
-static int tscSetResultPointer(SQueryInfo *pQueryInfo, SSqlRes *pRes) {
-  if (tscCreateResPointerInfo(pRes, pQueryInfo) != TSDB_CODE_SUCCESS) {
-    return pRes->code;
-  }
-
-  for (int i = 0; i < pQueryInfo->fieldsInfo.numOfOutput; ++i) {
-    int16_t offset = tscFieldInfoGetOffset(pQueryInfo, i);
-    pRes->tsrow[i] = (unsigned char*)((char*) pRes->data + offset * pRes->numOfRows);
-  }
-
-  return 0;
-}
-
 /*
  * this function can only be called once.
  * by using pRes->rspType to denote its status
@@ -1391,15 +1448,18 @@ static int tscLocalResultCommonBuilder(SSqlObj *pSql, int32_t numOfRes) {
   SSqlRes *pRes = &pSql->res;
   SSqlCmd *pCmd = &pSql->cmd;
 
-  SQueryInfo *pQueryInfo = tscGetQueryInfoDetail(pCmd, pCmd->clauseIndex);
-
   pRes->code = TSDB_CODE_SUCCESS;
   if (pRes->rspType == 0) {
     pRes->numOfRows = numOfRes;
     pRes->row = 0;
     pRes->rspType = 1;
 
-    tscSetResultPointer(pQueryInfo, pRes);
+    SQueryInfo *pQueryInfo = tscGetQueryInfoDetail(pCmd, pCmd->clauseIndex);
+    if (tscCreateResPointerInfo(pRes, pQueryInfo) != TSDB_CODE_SUCCESS) {
+      return pRes->code;
+    }
+
+    tscSetResRawPtr(pRes, pQueryInfo);
   } else {
     tscResetForNextRetrieve(pRes);
   }
@@ -1443,10 +1503,11 @@ int tscProcessRetrieveLocalMergeRsp(SSqlObj *pSql) {
   }
 
   pRes->code = tscDoLocalMerge(pSql);
-  SQueryInfo *pQueryInfo = tscGetQueryInfoDetail(pCmd, pCmd->clauseIndex);
 
   if (pRes->code == TSDB_CODE_SUCCESS && pRes->numOfRows > 0) {
+    SQueryInfo *pQueryInfo = tscGetQueryInfoDetail(pCmd, pCmd->clauseIndex);
     tscCreateResPointerInfo(pRes, pQueryInfo);
+    tscSetResRawPtr(pRes, pQueryInfo);
   }
 
   pRes->row = 0;
@@ -1946,7 +2007,7 @@ int tscProcessShowRsp(SSqlObj *pSql) {
     SInternalField* pInfo = tscFieldInfoAppend(pFieldInfo, &f);
     
     pInfo->pSqlExpr = tscSqlExprAppend(pQueryInfo, TSDB_FUNC_TS_DUMMY, &index,
-                     pTableSchema[i].type, pTableSchema[i].bytes, pTableSchema[i].bytes, false);
+                     pTableSchema[i].type, pTableSchema[i].bytes, getNewResColId(pQueryInfo), pTableSchema[i].bytes, false);
   }
   
   pCmd->numOfCols = pQueryInfo->fieldsInfo.numOfOutput;
@@ -2126,7 +2187,16 @@ int tscProcessRetrieveRspFromNode(SSqlObj *pSql) {
   if (tscCreateResPointerInfo(pRes, pQueryInfo) != TSDB_CODE_SUCCESS) {
     return pRes->code;
   }
-  
+
+  STableMetaInfo *pTableMetaInfo = tscGetMetaInfo(pQueryInfo, 0);
+  if (pCmd->command == TSDB_SQL_RETRIEVE) {
+    tscSetResRawPtr(pRes, pQueryInfo);
+  } else if ((UTIL_TABLE_IS_CHILD_TABLE(pTableMetaInfo) || UTIL_TABLE_IS_NORMAL_TABLE(pTableMetaInfo)) && !TSDB_QUERY_HAS_TYPE(pQueryInfo->type, TSDB_QUERY_TYPE_SUBQUERY)) {
+    tscSetResRawPtr(pRes, pQueryInfo);
+  } else if (tscNonOrderedProjectionQueryOnSTable(pQueryInfo, 0) && !TSDB_QUERY_HAS_TYPE(pQueryInfo->type, TSDB_QUERY_TYPE_JOIN_QUERY) && !TSDB_QUERY_HAS_TYPE(pQueryInfo->type, TSDB_QUERY_TYPE_JOIN_SEC_STAGE)) {
+    tscSetResRawPtr(pRes, pQueryInfo);
+  }
+
   if (pSql->pSubscription != NULL) {
     int32_t numOfCols = pQueryInfo->fieldsInfo.numOfOutput;
     
@@ -2148,7 +2218,7 @@ int tscProcessRetrieveRspFromNode(SSqlObj *pSql) {
   }
 
   pRes->row = 0;
-  tscDebug("%p numOfRows:%" PRId64 ", offset:%" PRId64 ", complete:%d", pSql, pRes->numOfRows, pRes->offset, pRes->completed);
+  tscDebug("%p numOfRows:%d, offset:%" PRId64 ", complete:%d", pSql, pRes->numOfRows, pRes->offset, pRes->completed);
 
   return 0;
 }
